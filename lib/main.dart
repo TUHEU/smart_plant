@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:flutter/services.dart';
+import 'services/bluetooth_service.dart';
 import 'package:flutter/material.dart';
 
 // ─────────────────────────────────────────────
@@ -60,13 +62,16 @@ class PlantData {
 
   /// Parses a raw Arduino string like "35.0,24.5,80,120,12"
   factory PlantData.fromRawString(String raw) {
-    final parts = raw.split(',');
+    final parts = raw.split(',').map((s) => s.trim()).toList();
+    double _pDouble(int i) => double.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0.0;
+    int _pInt(int i) => int.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0;
+
     return PlantData(
-      moisture: double.tryParse(parts.elementAtOrDefault(0, '0')) ?? 0,
-      temp: double.tryParse(parts.elementAtOrDefault(1, '0')) ?? 0,
-      light: int.tryParse(parts.elementAtOrDefault(2, '0')) ?? 0,
-      airQuality: int.tryParse(parts.elementAtOrDefault(3, '0')) ?? 0,
-      metalLevel: int.tryParse(parts.elementAtOrDefault(4, '0')) ?? 0,
+      moisture: _pDouble(0),
+      temp: _pDouble(1),
+      light: _pInt(2),
+      airQuality: _pInt(3),
+      metalLevel: _pInt(4),
     );
   }
 
@@ -119,19 +124,15 @@ class _PlantDashboardState extends State<PlantDashboard>
   bool _isPumpOn = false;
   bool _connected = false; // true when Bluetooth/Wi-Fi link is live
   late AnimationController _pulseController;
+  late final BleService _bleService;
+  StreamSubscription<String>? _bleSub;
 
   // Simulate incoming Arduino data every 3 seconds (replace with real BT stream)
   Timer? _simulationTimer;
 
-  @override
-  void initState() {
-    super.initState();
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
-
-    // ── Demo simulation (remove when wiring real Bluetooth) ──
+  void _startSimulation() {
+    _simulationTimer?.cancel();
+    if (_connected) return;
     _simulationTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       final rng = Random();
       final rawString =
@@ -145,10 +146,44 @@ class _PlantDashboardState extends State<PlantDashboard>
     });
   }
 
+  void _setConnected(bool connected) {
+    setState(() {
+      _connected = connected;
+      if (connected) {
+        _simulationTimer?.cancel();
+        _simulationTimer = null;
+      } else {
+        _startSimulation();
+      }
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
+    // BLE service
+    _bleService = BleService();
+    // listen for BLE incoming packets (will be quiet until connected)
+    _bleSub = _bleService.dataStream.listen((raw) {
+      _onDataReceived(raw);
+    }, onError: (e) {
+      debugPrint('BLE stream error: $e');
+    });
+
+    // ── Demo simulation (runs only when not connected)
+    _startSimulation();
+  }
+
   @override
   void dispose() {
     _pulseController.dispose();
     _simulationTimer?.cancel();
+    _bleSub?.cancel();
+    _bleService.dispose();
     super.dispose();
   }
 
@@ -164,6 +199,9 @@ class _PlantDashboardState extends State<PlantDashboard>
     setState(() => _isPumpOn = value);
     final command = value ? 'W' : 'w';
     debugPrint('[Arduino TX] $command'); // Replace with actual BT write
+    _bleService.sendCommand(command).then((ok) {
+      if (!ok) debugPrint('Failed to send pump command over BLE');
+    });
   }
 
   // ─────────────────────────────────────────────
@@ -286,6 +324,26 @@ class _PlantDashboardState extends State<PlantDashboard>
             ),
           ),
         ),
+        // Connect / disconnect button
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: IconButton(
+            tooltip: 'Connect Bluetooth',
+            icon: Icon(_connected ? Icons.link_off : Icons.bluetooth_searching, color: Colors.white),
+            onPressed: () async {
+              if (_connected) {
+                await _bleService.disconnect();
+                _setConnected(false);
+              } else {
+                final ok = await _bleService.scanAndConnect();
+                _setConnected(ok);
+                if (!ok) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No BLE device found')));
+                }
+              }
+            },
+          ),
+        ),
       ],
     );
   }
@@ -338,7 +396,15 @@ class _HealthBanner extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, color: Colors.white, size: 20),
+          // animated icon pulse
+          AnimatedBuilder(
+            animation: pulse,
+            builder: (_, __) => Icon(
+              icon,
+              color: Colors.white,
+              size: 18 + 6 * pulse.value,
+            ),
+          ),
           const SizedBox(width: 10),
           Text(
             'Status: $label',
@@ -436,7 +502,7 @@ class _SensorCard extends StatelessWidget {
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
             child: LinearProgressIndicator(
-              value: progress.clamp(0.0, 1.0),
+              value: progress.clamp(0.0, 1.0).toDouble(),
               minHeight: 6,
               color: alert ? Colors.redAccent : color,
               backgroundColor: color.withOpacity(0.15),

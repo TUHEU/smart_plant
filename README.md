@@ -1,17 +1,38 @@
-# smart_plant
+# Smart Plant — IoT Monitoring Dashboard
 
-A new Flutter project.
+This repository contains a Flutter dashboard and example Arduino code for the Smart Plant IoT project.
 
-## Getting Started
+What I changed and added:
+- Added BLE scaffolding using `flutter_blue_plus` and `lib/services/bluetooth_service.dart`.
+- Wired BLE into the app (`lib/main.dart`) so incoming CSV packets can replace the demo simulator.
+- Improved parsing safety in `PlantData.fromRawString` and made progress values safe for `LinearProgressIndicator`.
+- Added an example Arduino sketch at `hardware/arduino/plant_controller.ino` that emits CSV sensor lines and listens for pump commands.
 
-This project is a starting point for a Flutter application.
+Quick start (development):
 
-A few resources to get you started if this is your first Flutter project:
+1. Add BLE permission entries (Android/iOS):
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+- Android: add `BLUETOOTH`, `BLUETOOTH_ADMIN`, `ACCESS_FINE_LOCATION` or new Bluetooth permissions depending on Android SDK. See `flutter_blue_plus` docs.
+- iOS: add `NSBluetoothAlwaysUsageDescription` / `NSBluetoothPeripheralUsageDescription` as needed.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+2. Install dependencies:
+
+```bash
+flutter pub get
+```
+
+3. Run the app:
+
+```bash
+flutter run
+```
+
+Notes & next steps before deployment:
+- Calibrate sensors and implement the water-level interlock in Arduino code to avoid running the pump when the tank is empty.
+- Replace the BLE auto-connect heuristic with a device selector UI.
+- Add platform-specific permission handling (runtime) and background mode if required.
+
+If you want, I can now:
+- Implement a device picker UI for choosing the BLE device, or
+- Replace the BLE auto-connect with a settings screen, or
+- Add permission handling and Android/iOS manifest updates.
