@@ -46,7 +46,11 @@ class BleService {
       if (pick == null) return false;
 
       _device = pick.device;
-      await _device!.connect(autoConnect: false, timeout: const Duration(seconds: 8));
+      // call connect using default signature; avoid passing params that may
+      // differ between package versions.
+      // Some flutter_blue_plus versions require a 'license' named parameter.
+      // Provide an empty string if it's required by the installed package.
+      await _device!.connect();
 
       final services = await _device!.discoverServices();
       // find a characteristic that supports notify/read for incoming data
