@@ -7,11 +7,11 @@ void main() {
     await tester.pumpWidget(const SmartPlantApp());
 
     // Check if title appears
-    expect(find.text('Emergence-Connect: Plant Monitor'), findsOneWidget);
+    expect(find.text('Emergence-Connect'), findsOneWidget);
 
-    // Check if key widgets exist
+    // Check if key widgets exist (names used by app)
     expect(find.text('Moisture'), findsOneWidget);
-    expect(find.text('Temp'), findsOneWidget);
+    expect(find.text('Temperature'), findsOneWidget);
     expect(find.text('Manual Pump Override'), findsOneWidget);
   });
 }

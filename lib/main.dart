@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'services/bluetooth_service.dart';
+import 'services/serial_service.dart';
+import 'theme.dart';
 import 'package:flutter/material.dart';
 
 // ─────────────────────────────────────────────
@@ -63,15 +67,16 @@ class PlantData {
   /// Parses a raw Arduino string like "35.0,24.5,80,120,12"
   factory PlantData.fromRawString(String raw) {
     final parts = raw.split(',').map((s) => s.trim()).toList();
-    double _pDouble(int i) => double.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0.0;
-    int _pInt(int i) => int.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0;
+    double pDouble(int i) =>
+        double.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0.0;
+    int pInt(int i) => int.tryParse(parts.elementAtOrDefault(i, '0')) ?? 0;
 
     return PlantData(
-      moisture: _pDouble(0),
-      temp: _pDouble(1),
-      light: _pInt(2),
-      airQuality: _pInt(3),
-      metalLevel: _pInt(4),
+      moisture: pDouble(0),
+      temp: pDouble(1),
+      light: pInt(2),
+      airQuality: pInt(3),
+      metalLevel: pInt(4),
     );
   }
 
@@ -125,7 +130,10 @@ class _PlantDashboardState extends State<PlantDashboard>
   bool _connected = false; // true when Bluetooth/Wi-Fi link is live
   late AnimationController _pulseController;
   late final BleService _bleService;
+  late final SerialService _serialService;
   StreamSubscription<String>? _bleSub;
+  StreamSubscription<String>? _serialSub;
+  StreamSubscription<bool>? _bleConnSub;
 
   // Simulate incoming Arduino data every 3 seconds (replace with real BT stream)
   Timer? _simulationTimer;
@@ -167,15 +175,102 @@ class _PlantDashboardState extends State<PlantDashboard>
     )..repeat(reverse: true);
     // BLE service
     _bleService = BleService();
+    _serialService = SerialService();
     // listen for BLE incoming packets (will be quiet until connected)
-    _bleSub = _bleService.dataStream.listen((raw) {
-      _onDataReceived(raw);
-    }, onError: (e) {
-      debugPrint('BLE stream error: $e');
+    _bleSub = _bleService.dataStream.listen(
+      (raw) {
+        _onDataReceived(raw);
+      },
+      onError: (e) {
+        debugPrint('BLE stream error: $e');
+      },
+    );
+
+    // listen for connection state changes to update UI and handle auto-reconnect UX
+    _bleConnSub = _bleService.connectionStream.listen((connected) {
+      if (mounted) {
+        if (!connected) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Bluetooth disconnected — attempting reconnect'),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('Bluetooth connected')));
+        }
+        _setConnected(connected);
+      }
     });
 
-    // ── Demo simulation (runs only when not connected)
-    _startSimulation();
+    // serial stream (inactive until user opens a port)
+    _serialSub = _serialService.dataStream.listen(
+      (raw) {
+        _onDataReceived(raw);
+      },
+      onError: (e) {
+        debugPrint('Serial stream error: $e');
+      },
+    );
+
+    // Request permissions then start demo simulation (cancelled when connected)
+    _requestPermissions().then((granted) {
+      if (!granted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Bluetooth permissions required')),
+          );
+        });
+      }
+      _startSimulation();
+    });
+
+    _loadCalibration();
+  }
+
+  Future<bool> _requestPermissions() async {
+    try {
+      final scan = await Permission.bluetoothScan.request();
+      final connect = await Permission.bluetoothConnect.request();
+      final location = await Permission.locationWhenInUse.request();
+      if (scan.isPermanentlyDenied ||
+          connect.isPermanentlyDenied ||
+          location.isPermanentlyDenied) {
+        // Let user open app settings to enable permissions
+        await openAppSettings();
+        return false;
+      }
+      return scan.isGranted && connect.isGranted && location.isGranted;
+    } catch (e) {
+      debugPrint('Permission request error: $e');
+      return false;
+    }
+  }
+
+  // calibration storage
+  late SharedPreferences _prefs;
+  double _moistureMin = 300.0;
+  double _moistureMax = 700.0;
+
+  Future<void> _loadCalibration() async {
+    _prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _moistureMin = _prefs.getDouble('moisture_min') ?? 300.0;
+      _moistureMax = _prefs.getDouble('moisture_max') ?? 700.0;
+    });
+  }
+
+  Future<void> _saveCalibration(double min, double max) async {
+    await _prefs.setDouble('moisture_min', min);
+    await _prefs.setDouble('moisture_max', max);
+    setState(() {
+      _moistureMin = min;
+      _moistureMax = max;
+    });
+    // send calibration to device as a simple CSV command: CAL,moistMin,moistMax
+    final cmd = 'CAL,${min.toStringAsFixed(1)},${max.toStringAsFixed(1)}';
+    await _bleService.sendCommand(cmd);
   }
 
   @override
@@ -183,7 +278,10 @@ class _PlantDashboardState extends State<PlantDashboard>
     _pulseController.dispose();
     _simulationTimer?.cancel();
     _bleSub?.cancel();
+    _serialSub?.cancel();
+    _bleConnSub?.cancel();
     _bleService.dispose();
+    _serialService.dispose();
     super.dispose();
   }
 
@@ -210,7 +308,7 @@ class _PlantDashboardState extends State<PlantDashboard>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F4F1),
+      backgroundColor: kBackgroundColor,
       appBar: _buildAppBar(),
       body: SafeArea(
         child: Column(
@@ -302,7 +400,7 @@ class _PlantDashboardState extends State<PlantDashboard>
           ),
         ],
       ),
-      backgroundColor: const Color(0xFF2D6A4F),
+      backgroundColor: kPrimaryColor,
       foregroundColor: Colors.white,
       elevation: 0,
       actions: [
@@ -311,7 +409,7 @@ class _PlantDashboardState extends State<PlantDashboard>
           padding: const EdgeInsets.only(right: 16),
           child: AnimatedBuilder(
             animation: _pulseController,
-            builder: (_, __) => Icon(
+            builder: (context, child) => Icon(
               _connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
               color: _connected
                   ? Color.lerp(
@@ -324,22 +422,167 @@ class _PlantDashboardState extends State<PlantDashboard>
             ),
           ),
         ),
-        // Connect / disconnect button
+        // Device picker / connect button
         Padding(
           padding: const EdgeInsets.only(right: 8),
           child: IconButton(
-            tooltip: 'Connect Bluetooth',
-            icon: Icon(_connected ? Icons.link_off : Icons.bluetooth_searching, color: Colors.white),
+            tooltip: 'Devices',
+            icon: Icon(
+              _connected ? Icons.link_off : Icons.bluetooth_searching,
+              color: Colors.white,
+            ),
             onPressed: () async {
               if (_connected) {
+                _bleService.stopAutoReconnect();
                 await _bleService.disconnect();
+                await _serialService.close();
                 _setConnected(false);
-              } else {
-                final ok = await _bleService.scanAndConnect();
-                _setConnected(ok);
-                if (!ok) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No BLE device found')));
-                }
+                return;
+              }
+
+              final granted = await _requestPermissions();
+              if (!mounted) return;
+              if (!granted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Bluetooth permissions required'),
+                  ),
+                );
+                return;
+              }
+
+              // show device picker (BLE results + manual serial option)
+              await showModalBottomSheet(
+                context: context,
+                builder: (_) => SizedBox(
+                  height: 420,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.usb),
+                        title: const Text('Open Serial Port (manual)'),
+                        subtitle: const Text('Enter COM port, e.g. COM3'),
+                        onTap: () async {
+                          Navigator.of(context).pop();
+                          final portName = await showDialog<String>(
+                            context: context,
+                            builder: (ctx) {
+                              String value = '';
+                              return AlertDialog(
+                                title: const Text('Serial Port'),
+                                content: TextField(
+                                  decoration: const InputDecoration(
+                                    hintText: 'COM3 or /dev/ttyUSB0',
+                                  ),
+                                  onChanged: (v) => value = v.trim(),
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(ctx).pop(null),
+                                    child: const Text('Cancel'),
+                                  ),
+                                  ElevatedButton(
+                                    onPressed: () =>
+                                        Navigator.of(ctx).pop(value),
+                                    child: const Text('Open'),
+                                  ),
+                                ],
+                              );
+                            },
+                          );
+                          if (portName != null && portName.isNotEmpty) {
+                            final ok = _serialService.open(portName);
+                            _setConnected(ok);
+                            if (!ok && mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Failed to open serial port'),
+                                ),
+                              );
+                            }
+                          }
+                        },
+                      ),
+                      const Divider(),
+                      Expanded(
+                        child: StreamBuilder<List<ScanResult>>(
+                          stream: FlutterBluePlus.scanResults,
+                          builder: (c, s) {
+                            if (!s.hasData) {
+                              FlutterBluePlus.startScan(
+                                timeout: const Duration(seconds: 4),
+                              );
+                              return const Center(
+                                child: CircularProgressIndicator(),
+                              );
+                            }
+                            final results = s.data!;
+                            if (results.isEmpty) {
+                              return const Center(
+                                child: Text('No devices found'),
+                              );
+                            }
+                            return ListView(
+                              children: results.map((r) {
+                                final name = r.device.name.isNotEmpty
+                                    ? r.device.name
+                                    : r.device.id.id;
+                                return ListTile(
+                                  title: Text(name),
+                                  subtitle: Text(r.device.id.id),
+                                  onTap: () async {
+                                    final nav = Navigator.of(context);
+                                    final messenger = ScaffoldMessenger.of(
+                                      context,
+                                    );
+                                    await FlutterBluePlus.stopScan();
+                                    nav.pop();
+                                    final ok = await _bleService
+                                        .connectToDevice(r.device);
+                                    if (!mounted) return;
+                                    if (ok) {
+                                      _bleService.startAutoReconnect();
+                                      _setConnected(true);
+                                    } else {
+                                      _setConnected(false);
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Failed to connect'),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                );
+                              }).toList(),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        // Calibration button
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: IconButton(
+            tooltip: 'Calibration',
+            icon: const Icon(Icons.tune, color: Colors.white),
+            onPressed: () async {
+              final res = await showDialog<bool>(
+                context: context,
+                builder: (_) =>
+                    _CalibrationDialog(min: _moistureMin, max: _moistureMax),
+              );
+              if (!mounted) return;
+              if (res == true) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Calibration saved')),
+                );
               }
             },
           ),
@@ -399,11 +642,8 @@ class _HealthBanner extends StatelessWidget {
           // animated icon pulse
           AnimatedBuilder(
             animation: pulse,
-            builder: (_, __) => Icon(
-              icon,
-              color: Colors.white,
-              size: 18 + 6 * pulse.value,
-            ),
+            builder: (context, child) =>
+                Icon(icon, color: Colors.white, size: 18 + 6 * pulse.value),
           ),
           const SizedBox(width: 10),
           Text(
@@ -417,6 +657,75 @@ class _HealthBanner extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// Simple calibration dialog for moisture sensor
+class _CalibrationDialog extends StatefulWidget {
+  final double min;
+  final double max;
+  const _CalibrationDialog({required this.min, required this.max});
+
+  @override
+  State<_CalibrationDialog> createState() => _CalibrationDialogState();
+}
+
+class _CalibrationDialogState extends State<_CalibrationDialog> {
+  late double _min;
+  late double _max;
+
+  @override
+  void initState() {
+    super.initState();
+    _min = widget.min;
+    _max = widget.max;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Moisture Calibration'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Dry (ADC): ${_min.toStringAsFixed(0)}'),
+          Slider(
+            value: _min,
+            min: 0,
+            max: 1023,
+            onChanged: (v) => setState(() => _min = v),
+          ),
+          const SizedBox(height: 8),
+          Text('Wet (ADC): ${_max.toStringAsFixed(0)}'),
+          Slider(
+            value: _max,
+            min: 0,
+            max: 1023,
+            onChanged: (v) => setState(() => _max = v),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: () async {
+            // save values via parent state
+            final nav = Navigator.of(context);
+            final state = context
+                .findAncestorStateOfType<_PlantDashboardState>();
+            if (state != null) {
+              await state._saveCalibration(_min, _max);
+            }
+            if (!mounted) return;
+            nav.pop(true);
+          },
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }

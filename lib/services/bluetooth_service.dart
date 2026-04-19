@@ -9,6 +9,10 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 /// on [dataStream] and allows writing raw commands with [sendCommand].
 class BleService {
   final _controller = StreamController<String>.broadcast();
+  final _connectionController = StreamController<bool>.broadcast();
+  bool _connected = false;
+  bool _autoReconnect = false;
+  Timer? _reconnectTimer;
   // using static API from flutter_blue_plus where appropriate
 
   BluetoothDevice? _device;
@@ -16,8 +20,12 @@ class BleService {
   BluetoothCharacteristic? _txChar; // app -> device (write)
 
   Stream<String> get dataStream => _controller.stream;
+  Stream<bool> get connectionStream => _connectionController.stream;
 
-  Future<bool> scanAndConnect({Duration timeout = const Duration(seconds: 6), String nameFilter = 'Arduino'}) async {
+  Future<bool> scanAndConnect({
+    Duration timeout = const Duration(seconds: 6),
+    String nameFilter = 'Arduino',
+  }) async {
     try {
       // stop any previous activity
       await disconnect();
@@ -37,7 +45,8 @@ class BleService {
       // pick first device with name containing filter or first available
       ScanResult? pick;
       for (var r in results) {
-        if (r.device.name.isNotEmpty && r.device.name.toLowerCase().contains(nameFilter.toLowerCase())) {
+        if (r.device.name.isNotEmpty &&
+            r.device.name.toLowerCase().contains(nameFilter.toLowerCase())) {
           pick = r;
           break;
         }
@@ -46,10 +55,7 @@ class BleService {
       if (pick == null) return false;
 
       _device = pick.device;
-      // call connect using default signature; avoid passing params that may
-      // differ between package versions.
-      // Some flutter_blue_plus versions require a 'license' named parameter.
-      // Provide an empty string if it's required by the installed package.
+      // connect to the chosen device
       await _device!.connect();
 
       final services = await _device!.discoverServices();
@@ -97,9 +103,58 @@ class BleService {
         }
       });
 
+      _setConnected(true);
+
       return true;
     } catch (e) {
       if (kDebugMode) print('BLE connect error: $e');
+      await disconnect();
+      return false;
+    }
+  }
+
+  /// Connect to a specific device selected by the user.
+  Future<bool> connectToDevice(BluetoothDevice device) async {
+    try {
+      await disconnect();
+      _device = device;
+      await _device!.connect();
+      final services = await _device!.discoverServices();
+      // reuse characteristic discovery from scanAndConnect
+      for (var s in services) {
+        for (var c in s.characteristics) {
+          if (_rxChar == null && (c.properties.notify || c.properties.read)) {
+            _rxChar = c;
+          }
+          if (_txChar == null &&
+              (c.properties.write || c.properties.writeWithoutResponse)) {
+            _txChar = c;
+          }
+          if (_rxChar != null && _txChar != null) break;
+        }
+        if (_rxChar != null && _txChar != null) break;
+      }
+
+      if (_rxChar == null) {
+        await disconnect();
+        return false;
+      }
+
+      await _rxChar!.setNotifyValue(true);
+      _rxChar!.value.listen((bytes) {
+        try {
+          final s = utf8.decode(bytes).trim();
+          if (s.isNotEmpty) _controller.add(s);
+        } catch (e) {
+          if (kDebugMode) print('BLE: decode error $e');
+        }
+      });
+
+      _setConnected(true);
+
+      return true;
+    } catch (e) {
+      if (kDebugMode) print('connectToDevice error: $e');
       await disconnect();
       return false;
     }
@@ -116,15 +171,58 @@ class BleService {
       if (_device != null) {
         await _device!.disconnect();
         _device = null;
+        _setConnected(false);
       }
     } catch (_) {}
+  }
+
+  void _setConnected(bool v) {
+    _connected = v;
+    _connectionController.add(v);
+    if (!v && _autoReconnect) _scheduleReconnect();
+    if (v && _reconnectTimer != null) {
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
+  }
+
+  void startAutoReconnect() {
+    _autoReconnect = true;
+    if (!_connected) _scheduleReconnect();
+  }
+
+  void stopAutoReconnect() {
+    _autoReconnect = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+  }
+
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+    // simple backoff: try after 3s
+    _reconnectTimer = Timer(const Duration(seconds: 3), () async {
+      if (_device == null) return;
+      try {
+        final ok = await connectToDevice(_device!);
+        if (!ok) {
+          // try again
+          _scheduleReconnect();
+        }
+      } catch (_) {
+        _scheduleReconnect();
+      }
+    });
   }
 
   Future<bool> sendCommand(String text) async {
     if (_txChar == null) return false;
     try {
-      final bytes = utf8.encode(text);
-      await _txChar!.write(bytes, withoutResponse: !_txChar!.properties.write);
+      final payload = text.endsWith('\n') ? text : '$text\n';
+      final bytes = utf8.encode(payload);
+      await _txChar!.write(
+        bytes,
+        withoutResponse: _txChar!.properties.writeWithoutResponse,
+      );
       return true;
     } catch (e) {
       if (kDebugMode) print('BLE write error: $e');
@@ -134,5 +232,7 @@ class BleService {
 
   void dispose() {
     _controller.close();
+    _connectionController.close();
+    _reconnectTimer?.cancel();
   }
 }
