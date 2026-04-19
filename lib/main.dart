@@ -886,7 +886,7 @@ class _ManualControl extends StatelessWidget {
             ),
           ),
           value: isPumpOn,
-          activeColor: const Color(0xFF0077B6),
+          activeThumbColor: const Color(0xFF0077B6),
           onChanged: onToggle,
           // Sends 'W' (on) or 'w' (off) to Arduino via BT
         ),
