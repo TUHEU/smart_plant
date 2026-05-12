@@ -2,104 +2,68 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
-/// Simple BLE bridge that scans for a device and subscribes to the first
-/// notify characteristic it finds. Emits incoming UTF-8 sensor CSV lines
-/// on [dataStream] and allows writing raw commands with [sendCommand].
-class BleService {
+/// Simple Bluetooth Classic bridge for HC-05 serial communication.
+/// Connects to HC-05 device and provides serial-like data streaming.
+/// Emits incoming UTF-8 sensor CSV lines on [dataStream] and allows
+/// writing raw commands with [sendCommand].
+class BluetoothService {
   final _controller = StreamController<String>.broadcast();
-  // using static API from flutter_blue_plus where appropriate
 
-  BluetoothDevice? _device;
-  BluetoothCharacteristic? _rxChar; // device -> app (notify)
-  BluetoothCharacteristic? _txChar; // app -> device (write)
+  BluetoothConnection? _connection;
 
   Stream<String> get dataStream => _controller.stream;
 
-  Future<bool> scanAndConnect({Duration timeout = const Duration(seconds: 6), String nameFilter = 'Arduino'}) async {
+  Future<bool> scanAndConnect({Duration timeout = const Duration(seconds: 6), String nameFilter = 'HC-05'}) async {
     try {
       // stop any previous activity
       await disconnect();
 
-      final results = <ScanResult>[];
-      // start scanning and collect results
-      FlutterBluePlus.startScan(timeout: timeout);
-      final sub = FlutterBluePlus.scanResults.listen((r) {
-        results.clear();
-        results.addAll(r);
-      });
+      // Get bonded devices first (paired devices)
+      List<BluetoothDevice> bondedDevices = await FlutterBluetoothSerial.instance.getBondedDevices();
 
-      await Future.delayed(timeout);
-      await FlutterBluePlus.stopScan();
-      await sub.cancel();
-
-      // pick first device with name containing filter or first available
-      ScanResult? pick;
-      for (var r in results) {
-        if (r.device.name.isNotEmpty && r.device.name.toLowerCase().contains(nameFilter.toLowerCase())) {
-          pick = r;
+      // Look for device with name containing filter
+      BluetoothDevice? targetDevice;
+      for (var device in bondedDevices) {
+        if (device.name != null && device.name!.toLowerCase().contains(nameFilter.toLowerCase())) {
+          targetDevice = device;
           break;
         }
       }
-      pick ??= results.isNotEmpty ? results.first : null;
-      if (pick == null) return false;
 
-      _device = pick.device;
-      // call connect using default signature; avoid passing params that may
-      // differ between package versions.
-      // Some flutter_blue_plus versions require a 'license' named parameter.
-      // Provide an empty string if it's required by the installed package.
-      await _device!.connect();
-
-      final services = await _device!.discoverServices();
-      // find a characteristic that supports notify/read for incoming data
-      for (var s in services) {
-        for (var c in s.characteristics) {
-          if (c.properties.notify || c.properties.read) {
-            _rxChar = c;
-          }
-          if (c.properties.write || c.properties.writeWithoutResponse) {
-            _txChar = c;
-          }
-          if (_rxChar != null && _txChar != null) break;
-        }
-        if (_rxChar != null && _txChar != null) break;
-      }
-
-      if (_rxChar == null) {
-        // subscribe to any notify characteristic if available
-        for (var s in services) {
-          for (var c in s.characteristics) {
-            if (c.properties.notify) {
-              _rxChar = c;
-              break;
-            }
-          }
-          if (_rxChar != null) break;
-        }
-      }
-
-      if (_rxChar == null) {
-        // no readable/notify char found
-        await disconnect();
+      if (targetDevice == null) {
+        if (kDebugMode) print('No bonded device found with name containing: $nameFilter');
         return false;
       }
 
-      // enable notifications
-      await _rxChar!.setNotifyValue(true);
-      _rxChar!.value.listen((bytes) {
+      // Attempt to connect
+      _connection = await BluetoothConnection.toAddress(targetDevice.address);
+
+      // Listen for incoming data
+      _connection!.input!.listen((Uint8List data) {
         try {
-          final s = utf8.decode(bytes).trim();
-          if (s.isNotEmpty) _controller.add(s);
+          final s = utf8.decode(data).trim();
+          if (s.isNotEmpty) {
+            // Split by newlines in case multiple messages arrived
+            final lines = s.split('\n');
+            for (var line in lines) {
+              if (line.trim().isNotEmpty) {
+                _controller.add(line.trim());
+              }
+            }
+          }
         } catch (e) {
-          if (kDebugMode) print('BLE: decode error $e');
+          if (kDebugMode) print('Bluetooth decode error: $e');
         }
+      }).onDone(() {
+        if (kDebugMode) print('Bluetooth connection closed');
+        disconnect();
       });
 
       return true;
     } catch (e) {
-      if (kDebugMode) print('BLE connect error: $e');
+      if (kDebugMode) print('Bluetooth connect error: $e');
       await disconnect();
       return false;
     }
@@ -107,32 +71,30 @@ class BleService {
 
   Future<void> disconnect() async {
     try {
-      if (_rxChar != null) {
-        await _rxChar!.setNotifyValue(false);
-        _rxChar = null;
+      if (_connection != null) {
+        await _connection!.close();
+        _connection = null;
       }
-    } catch (_) {}
-    try {
-      if (_device != null) {
-        await _device!.disconnect();
-        _device = null;
-      }
-    } catch (_) {}
+    } catch (e) {
+      if (kDebugMode) print('Disconnect error: $e');
+    }
   }
 
   Future<bool> sendCommand(String text) async {
-    if (_txChar == null) return false;
+    if (_connection == null || !_connection!.isConnected) return false;
     try {
-      final bytes = utf8.encode(text);
-      await _txChar!.write(bytes, withoutResponse: !_txChar!.properties.write);
+      final bytes = utf8.encode('$text\n'); // Add newline for Arduino
+      _connection!.output.add(bytes);
+      await _connection!.output.allSent;
       return true;
     } catch (e) {
-      if (kDebugMode) print('BLE write error: $e');
+      if (kDebugMode) print('Bluetooth write error: $e');
       return false;
     }
   }
 
   void dispose() {
     _controller.close();
+    disconnect();
   }
 }
