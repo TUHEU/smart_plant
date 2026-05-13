@@ -13,12 +13,12 @@ class FarmLinkApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'FarmLink IoT',
+      title: 'Smart Plant Monitor',
       theme: ThemeData(
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
         primarySwatch: Colors.green,
-        scaffoldBackgroundColor: Color(0xFF121212), // Deep dark background
-        cardColor: Color(0xFF1E1E1E), // Slightly lighter for cards
+        scaffoldBackgroundColor: Colors.transparent, // Allow web CSS background to show
+        cardColor: Colors.white,
         fontFamily: 'Roboto',
       ),
       home: DashboardScreen(),
@@ -161,7 +161,7 @@ class DashboardScreenState extends State<DashboardScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('FarmLink Analytics', style: TextStyle(fontWeight: FontWeight.w300, letterSpacing: 1.2)),
+        title: Text('Smart Plant Monitor', style: TextStyle(fontWeight: FontWeight.w300, letterSpacing: 1.2)),
         backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
@@ -184,7 +184,7 @@ class DashboardScreenState extends State<DashboardScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text("Plant Status", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Colors.white)),
+                  Text("Plant Status", style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
                   SizedBox(height: 8),
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -196,7 +196,6 @@ class DashboardScreenState extends State<DashboardScreen> {
                     child: Text(
                       isTankEmpty ? '⚠️ TANK EMPTY - PUMP DISABLED' : '✔️ SYSTEM OPTIMAL',
                       style: TextStyle(
-                        color: isTankEmpty ? Colors.redAccent : Colors.greenAccent, 
                         fontWeight: FontWeight.bold,
                         letterSpacing: 1.1
                       ),
@@ -230,9 +229,9 @@ class DashboardScreenState extends State<DashboardScreen> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text("Water Pump", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+                        Text("Water Pump", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                         SizedBox(height: 4),
-                        Text(isPumpActive ? "Irrigating..." : "Standby", style: TextStyle(color: Colors.white70)),
+                        Text(isPumpActive ? "Irrigating..." : "Standby"),
                       ],
                     ),
                     // The Override Switch
@@ -298,9 +297,9 @@ class DashboardScreenState extends State<DashboardScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(value, style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
+                Text(value, style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
                 SizedBox(height: 4),
-                Text(title, style: TextStyle(fontSize: 14, color: Colors.grey[400], fontWeight: FontWeight.w500)),
+                Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
               ],
             ),
           ],
